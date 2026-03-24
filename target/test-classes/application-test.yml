@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${spring.datasource.host:localhost}:${spring.datasource.port:5432}/ragnarok_antifraude_test
+    username: postgres
+    password: postgre
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: ${spring.redis.host:localhost}
+      port: ${spring.redis.port:6379}
+
+antifraude:
+  api-key:
+
+logging:
+  level:
+    com.ragnarok.antifraude: DEBUG
