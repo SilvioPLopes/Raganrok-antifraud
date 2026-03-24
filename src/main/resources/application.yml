@@ -1,0 +1,32 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: ragnarok-antifraude
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ragnarok_antifraude_db
+    username: postgres
+    password: ${DB_PASS:postgre}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASS:}
+      timeout: 100ms
+
+antifraude:
+  api-key: ${ANTIFRAUDE_API_KEY:}
+
+logging:
+  level:
+    com.ragnarok.antifraude: INFO

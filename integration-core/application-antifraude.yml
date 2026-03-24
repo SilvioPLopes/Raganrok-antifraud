@@ -1,0 +1,36 @@
+# ============================================================================
+# TRECHO PARA application.yml do ragnarok-core
+# ============================================================================
+# Cole este bloco no application.yml do seu ragnarok-core para configurar
+# a integração com o microsserviço antifraude.
+
+# URL do microsserviço antifraude
+antifraude:
+  url: ${ANTIFRAUDE_URL:http://localhost:8081}
+
+# ── Resilience4j — Circuit Breaker ──────────────────────────────────────────
+resilience4j:
+  circuitbreaker:
+    instances:
+      antifraude:
+        # Abre o circuito após 5 chamadas com falha em uma janela de 10 chamadas
+        sliding-window-size: 10
+        failure-rate-threshold: 50           # 50% de falha → circuito abre
+        wait-duration-in-open-state: 30s     # aguarda 30s antes de tentar de novo
+        permitted-number-of-calls-in-half-open-state: 3
+        # Timeouts e exceções que contam como falha
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.web.reactive.function.client.WebClientRequestException
+
+  timelimiter:
+    instances:
+      antifraude:
+        timeout-duration: 100ms              # nunca espera mais de 100ms pelo antifraude
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+logging:
+  level:
+    com.ragnarok.infrastructure.antifraude: INFO
+    io.github.resilience4j: WARN
