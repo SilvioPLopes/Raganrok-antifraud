@@ -6,5 +6,5 @@ scrape_configs:
   - job_name: ragnarok-antifraude
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['ragnarok-antifraude:8081']
+      - targets: ['antifraude:8081']
     scrape_interval: 10s
