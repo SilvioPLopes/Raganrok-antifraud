@@ -12,6 +12,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    networks:
+      - ragnarok-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -27,6 +29,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - ragnarok-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -52,6 +56,8 @@ services:
       SPRING_DATA_REDIS_HOST: redis
     ports:
       - "8081:8081"
+    networks:
+      - ragnarok-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/api/fraud/health || exit 1"]
       interval: 15s
@@ -59,6 +65,41 @@ services:
       start_period: 40s
       retries: 3
 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - ragnarok-net
+    depends_on:
+      antifraude:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    networks:
+      - ragnarok-net
+    depends_on:
+      - prometheus
+
+networks:
+  ragnarok-net:
+    driver: bridge
+
 volumes:
   postgres_data:
   redis_data:
+  grafana-data:
