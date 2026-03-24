@@ -37,7 +37,6 @@ public class DisproportionateTransferRule implements FraudRule {
         try {
             Long itemId = event.payloadValue("itemId", Long.class);
             Long zenysValue = event.payloadValue("zenysValue", Long.class);
-
             if (itemId == null || zenysValue == null || zenysValue <= 0) {
                 return RuleResult.approved(ruleId());
             }

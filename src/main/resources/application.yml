@@ -5,7 +5,7 @@ spring:
   application:
     name: ragnarok-antifraude
   datasource:
-    url: jdbc:postgresql://localhost:5432/ragnarok_antifraude_db
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/ragnarok_antifraude_db}
     username: postgres
     password: ${DB_PASS:postgre}
     hikari:

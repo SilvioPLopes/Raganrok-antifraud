@@ -144,3 +144,46 @@ docker compose up -d
 O ragnarok-core chama o antifraude via HTTP. O `FraudClient.java` e `UsageExamples.java` ficam DENTRO do ragnarok-core (não deste projeto). Este projeto é só o microsserviço que recebe e responde.
 
 O core atual é Java 17 — o FraudClient precisa ser compatível com Java 17. O antifraude em si é Java 21.
+
+## Análise do Estado Atual (2026-03-24)
+
+### Status dos testes
+
+| Suite | Comando | Status | Pré-requisito |
+|---|---|---|---|
+| Unitários (regras) | `./mvnw test -Dtest="FraudRulesUnitTest,FraudAnalysisServiceTest"` | ✅ 25/25 | Nenhum |
+| Simulação | `./mvnw test -Dtest="SimulationControllerTest,SimulationServiceTest,SimulationResultTest"` | ✅ 6/6 | Nenhum |
+| Integração | `./mvnw test -Dtest="FraudControllerIntegrationTest"` | ❌ Requer Docker Engine ativo | Docker Desktop rodando |
+
+O teste de integração usa Testcontainers (sobe PostgreSQL + Redis via Docker automaticamente).
+Para rodá-lo: abrir o Docker Desktop e aguardar o engine iniciar, depois executar o comando acima.
+
+O erro `TypeTag::UNKNOWN` que aparece ocasionalmente é causado por lock no JAR enquanto a aplicação está rodando.
+Solução: parar o processo antes de fazer `./mvnw clean install`.
+
+### Bugs conhecidos (a corrigir)
+
+| Prioridade | Problema | Localização |
+|---|---|---|
+| 🔴 Alta | Instance cooldown não persiste no PostgreSQL — Redis restart apaga todos os cooldowns | `RedisPlayerActivityAdapter:139` (fallback ausente) |
+| 🔴 Alta | `recordInstanceEntry` não grava no PostgreSQL (source of truth incompleto) | `RedisPlayerActivityAdapter:147` |
+| 🟡 Média | `ExecutorService` do motor paralelo nunca é fechado no shutdown | `FraudAnalysisService:46` |
+| 🟡 Média | `networkLatencyMs` lido mas nunca usado em `BotClickSpeedRule` | `BotClickSpeedRule:43` |
+| 🟡 Média | `ApiKeyFilter` usa `String.equals` em vez de constant-time comparison | `ApiKeyFilter:56` |
+| 🟡 Média | `saveRegistrationData` não persiste `emailVerified`/`ageVerified` | `RedisPlayerActivityAdapter:164` |
+| 🟢 Baixa | TODO comment desatualizado (implementação já existe) | `RedisPlayerActivityAdapter:21` |
+| 🟢 Baixa | Testes unitários faltando para regras 4 (BotClickSpeed), 6 (CashSecurity), 7 (InstanceCooldown) | `FraudRulesUnitTest` |
+
+### Cobertura das 9 regras por testes unitários
+
+| # | Regra | Testada unitariamente |
+|---|---|---|
+| 1 | AntiDupeRule | ✅ |
+| 2 | DisproportionateTransferRule | ✅ |
+| 3 | BotFarmTimeRule | ✅ |
+| 4 | BotClickSpeedRule | ❌ |
+| 5 | RegistrationValidationRule | ✅ |
+| 6 | CashSecurityRule | ❌ |
+| 7 | InstanceCooldownRule | ❌ |
+| 8 | ImpossibleTravelRule | ✅ |
+| 9 | MarketMonopolyRule | ✅ |

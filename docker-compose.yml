@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DB_PASS:-postgre}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
@@ -50,6 +50,7 @@ services:
         condition: service_healthy
     environment:
       DB_PASS: ${DB_PASS:-postgre}
+      ANTIFRAUDE_API_KEY: ${ANTIFRAUDE_API_KEY:-}
       REDIS_HOST: redis
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ragnarok_antifraude_db
       SPRING_DATASOURCE_USERNAME: postgres
