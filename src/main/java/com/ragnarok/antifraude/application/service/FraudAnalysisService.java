@@ -56,7 +56,14 @@ public class FraudAnalysisService implements FraudAnalysisUseCase {
             .toList();
 
         if (applicable.isEmpty()) {
-            return FraudDecision.approved(event.eventId(), event.playerId(), System.currentTimeMillis() - start);
+            long earlyElapsed = System.currentTimeMillis() - start;
+            meterRegistry.counter("fraud.decisions.total",
+                "verdict", Verdict.APPROVED.name(),
+                "eventType", event.eventType()
+            ).increment();
+            meterRegistry.timer("fraud.processing.duration")
+                .record(Duration.ofMillis(earlyElapsed));
+            return FraudDecision.approved(event.eventId(), event.playerId(), earlyElapsed);
         }
 
         // 2. Executa em paralelo

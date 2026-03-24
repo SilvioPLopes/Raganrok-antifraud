@@ -125,6 +125,22 @@ class FraudAnalysisServiceTest {
         assertThat(meterRegistry.find("fraud.processing.duration").timer().count()).isGreaterThan(0);
     }
 
+    @Test
+    @DisplayName("analyze registra fraud.rule.triggered.total quando uma regra dispara")
+    void analyze_recordsRuleTriggeredCounterMetric() {
+        FraudRule ruleBlock = stubRule("R2", "ITEM_TRADE",
+            RuleResult.blocked("R2", RequiredAction.CANCEL_ACTION, RiskLevel.HIGH, "blocked"));
+
+        var service = new FraudAnalysisService(List.of(ruleBlock), auditLogService, meterRegistry);
+        service.analyze(event("ITEM_TRADE"));
+
+        Counter ruleCounter = meterRegistry.find("fraud.rule.triggered.total")
+            .tag("ruleId", "R2")
+            .counter();
+        assertThat(ruleCounter).isNotNull();
+        assertThat(ruleCounter.count()).isGreaterThan(0);
+    }
+
     // ── Helper ──────────────────────────────────────────────────────────────
 
     private FraudRule stubRule(String id, String eventType, RuleResult result) {
