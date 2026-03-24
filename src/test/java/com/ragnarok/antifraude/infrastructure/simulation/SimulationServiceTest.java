@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.HashOperations;
 
@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 class SimulationServiceTest {
 
     @Mock FraudAnalysisUseCase fraudAnalysisUseCase;
-    @Mock RedisTemplate<String, String> redisTemplate;
+    @Mock StringRedisTemplate redisTemplate;
     @Mock ValueOperations<String, String> valueOps;
     @SuppressWarnings("rawtypes")
     @Mock HashOperations hashOps;

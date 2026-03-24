@@ -3,7 +3,7 @@ package com.ragnarok.antifraude.infrastructure.simulation;
 import com.ragnarok.antifraude.domain.model.FraudDecision;
 import com.ragnarok.antifraude.domain.model.FraudEvent;
 import com.ragnarok.antifraude.domain.port.in.FraudAnalysisUseCase;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -20,6 +20,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Lives in infrastructure because it needs direct Redis access for state seeding.
  *
  * Player IDs start from SIM_PLAYER_BASE (900_000) to avoid collision with real data.
+ *
+ * NOTE: Injects StringRedisTemplate for Redis serializer alignment with production adapters
+ * (RedisPlayerActivityAdapter, RedisTransactionAdapter). Spring Boot auto-configures only
+ * StringRedisTemplate by default; both this service and adapters use consistent String
+ * serialization on keys and values.
  */
 @Service
 public class SimulationService {
@@ -33,10 +38,10 @@ public class SimulationService {
     private static final String INSTANCE_KEY_PREFIX = "antifraude:instance:";
 
     private final FraudAnalysisUseCase fraudAnalysisUseCase;
-    private final RedisTemplate<String, String> redisTemplate;
+    private final StringRedisTemplate redisTemplate;
 
     public SimulationService(FraudAnalysisUseCase fraudAnalysisUseCase,
-                             RedisTemplate<String, String> redisTemplate) {
+                             StringRedisTemplate redisTemplate) {
         this.fraudAnalysisUseCase = fraudAnalysisUseCase;
         this.redisTemplate = redisTemplate;
     }
@@ -104,7 +109,9 @@ public class SimulationService {
 
     /** Same UUID sent twice — triggers ANTI_DUPE. */
     private List<FraudDecision> runItemDupe(int count) {
-        List<FraudDecision> decisions = new ArrayList<>(count);
+        List<FraudDecision> decisions = new ArrayList<>(count * 2);
+        // NOTE: each iteration sends 2 events (original + duplicate).
+        // With count=N this generates 2*N events total — the second event in each pair triggers ANTI_DUPE.
         for (int i = 0; i < count; i++) {
             long playerId = SIM_PLAYER_BASE + 100 + i;
             // Re-use same UUID pair to trigger duplicate detection
