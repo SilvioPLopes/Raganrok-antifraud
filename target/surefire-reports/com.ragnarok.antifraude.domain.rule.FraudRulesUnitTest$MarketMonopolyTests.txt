@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.ragnarok.antifraude.domain.rule.FraudRulesUnitTest$MarketMonopolyTests
--------------------------------------------------------------------------------
-Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.050 s -- in com.ragnarok.antifraude.domain.rule.FraudRulesUnitTest$MarketMonopolyTests
