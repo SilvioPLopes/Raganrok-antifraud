@@ -4,10 +4,12 @@ import com.ragnarok.antifraude.domain.model.*;
 import com.ragnarok.antifraude.domain.port.in.FraudAnalysisUseCase;
 import com.ragnarok.antifraude.domain.rule.FraudRule;
 import com.ragnarok.antifraude.domain.rule.RuleResult;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -35,10 +37,12 @@ public class FraudAnalysisService implements FraudAnalysisUseCase {
     private final List<FraudRule> rules;
     private final AuditLogService auditLogService;
     private final ExecutorService executor;
+    private final MeterRegistry meterRegistry;
 
-    public FraudAnalysisService(List<FraudRule> rules, AuditLogService auditLogService) {
+    public FraudAnalysisService(List<FraudRule> rules, AuditLogService auditLogService, MeterRegistry meterRegistry) {
         this.rules = rules;
         this.auditLogService = auditLogService;
+        this.meterRegistry = meterRegistry;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
@@ -81,6 +85,19 @@ public class FraudAnalysisService implements FraudAnalysisUseCase {
         // 5. Combina: pior veredicto vence, maior prioridade em caso de empate
         long elapsed = System.currentTimeMillis() - start;
         FraudDecision decision = combineResults(event, results, elapsed);
+
+        // Metrics
+        meterRegistry.counter("fraud.decisions.total",
+            "verdict", decision.verdict().name(),
+            "eventType", event.eventType()
+        ).increment();
+
+        decision.triggeredRules().forEach(ruleId ->
+            meterRegistry.counter("fraud.rule.triggered.total", "ruleId", ruleId).increment()
+        );
+
+        meterRegistry.timer("fraud.processing.duration")
+            .record(Duration.ofMillis(elapsed));
 
         // 6. Audit assíncrono
         auditLogService.logAsync(event, decision);

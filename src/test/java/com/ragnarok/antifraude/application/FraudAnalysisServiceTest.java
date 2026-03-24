@@ -5,6 +5,8 @@ import com.ragnarok.antifraude.application.service.FraudAnalysisService;
 import com.ragnarok.antifraude.domain.model.*;
 import com.ragnarok.antifraude.domain.rule.FraudRule;
 import com.ragnarok.antifraude.domain.rule.RuleResult;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,12 +18,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.*;
 
 @ExtendWith(MockitoExtension.class)
 class FraudAnalysisServiceTest {
 
     @Mock AuditLogService auditLogService;
+
+    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
     private FraudEvent event(String eventType) {
         return new FraudEvent("e1", eventType, 1L, "127.0.0.1", "BR", Instant.now(), Map.of());
@@ -30,7 +35,7 @@ class FraudAnalysisServiceTest {
     @Test
     @DisplayName("Nenhuma regra aplicável → APPROVED")
     void noApplicableRules_approved() {
-        var service = new FraudAnalysisService(List.of(), auditLogService);
+        var service = new FraudAnalysisService(List.of(), auditLogService, meterRegistry);
         var result = service.analyze(event("UNKNOWN_EVENT"));
         assertEquals(Verdict.APPROVED, result.verdict());
     }
@@ -41,7 +46,7 @@ class FraudAnalysisServiceTest {
         FraudRule rule1 = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
         FraudRule rule2 = stubRule("R2", "ITEM_TRADE", RuleResult.approved("R2"));
 
-        var service = new FraudAnalysisService(List.of(rule1, rule2), auditLogService);
+        var service = new FraudAnalysisService(List.of(rule1, rule2), auditLogService, meterRegistry);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.APPROVED, result.verdict());
     }
@@ -53,7 +58,7 @@ class FraudAnalysisServiceTest {
         FraudRule ruleBlock = stubRule("R2", "ITEM_TRADE",
             RuleResult.blocked("R2", RequiredAction.CANCEL_ACTION, RiskLevel.HIGH, "blocked"));
 
-        var service = new FraudAnalysisService(List.of(ruleOk, ruleBlock), auditLogService);
+        var service = new FraudAnalysisService(List.of(ruleOk, ruleBlock), auditLogService, meterRegistry);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.BLOCKED, result.verdict());
         assertTrue(result.triggeredRules().contains("R2"));
@@ -72,7 +77,7 @@ class FraudAnalysisServiceTest {
             }
         };
 
-        var service = new FraudAnalysisService(List.of(slowRule), auditLogService);
+        var service = new FraudAnalysisService(List.of(slowRule), auditLogService, meterRegistry);
         var result = service.analyze(event("ITEM_TRADE"));
         // Regra não retornou a tempo → ignorada → APPROVED
         assertEquals(Verdict.APPROVED, result.verdict());
@@ -90,9 +95,34 @@ class FraudAnalysisServiceTest {
             }
         };
 
-        var service = new FraudAnalysisService(List.of(crashingRule), auditLogService);
+        var service = new FraudAnalysisService(List.of(crashingRule), auditLogService, meterRegistry);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.APPROVED, result.verdict());
+    }
+
+    @Test
+    @DisplayName("analyze registra métrica fraud.decisions.total")
+    void analyze_recordsDecisionCounterMetric() {
+        FraudRule rule = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
+        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry);
+
+        service.analyze(event("ITEM_TRADE"));
+
+        Counter counter = meterRegistry.find("fraud.decisions.total").counter();
+        assertThat(counter).isNotNull();
+        assertThat(counter.count()).isGreaterThan(0);
+    }
+
+    @Test
+    @DisplayName("analyze registra métrica fraud.processing.duration")
+    void analyze_recordsProcessingDurationMetric() {
+        FraudRule rule = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
+        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry);
+
+        service.analyze(event("ITEM_TRADE"));
+
+        assertThat(meterRegistry.find("fraud.processing.duration").timer()).isNotNull();
+        assertThat(meterRegistry.find("fraud.processing.duration").timer().count()).isGreaterThan(0);
     }
 
     // ── Helper ──────────────────────────────────────────────────────────────
