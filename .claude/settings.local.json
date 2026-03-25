@@ -59,7 +59,22 @@
       "Bash(powershell -Command \"Get-ChildItem '\\\\\\\\.\\\\pipe\\\\' | Where-Object { $_.Name -like '*docker*' } | Select-Object Name\")",
       "Bash(powershell -Command \"[System.IO.Directory]::GetFiles\\('\\\\\\\\\\\\\\\\.\\\\\\\\pipe\\\\\\\\'\\) | Where-Object { $_ -like '*docker*' }\")",
       "Bash(powershell -Command \"& { \\\\$pipes = [System.IO.Directory]::GetFiles\\('\\\\\\\\\\\\\\\\.\\\\\\\\pipe'\\); \\\\$pipes | Where-Object { \\\\$_ -match 'docker' } }\" 2>&1)",
-      "Bash(powershell -Command \"& { \\\\$pipes = [System.IO.Directory]::GetFiles\\('\\\\\\\\\\\\\\\\.\\\\pipe'\\); \\\\$pipes | Where-Object { \\\\$_ -match 'docker' } }\" 2>&1)"
+      "Bash(powershell -Command \"& { \\\\$pipes = [System.IO.Directory]::GetFiles\\('\\\\\\\\\\\\\\\\.\\\\pipe'\\); \\\\$pipes | Where-Object { \\\\$_ -match 'docker' } }\" 2>&1)",
+      "Bash(./mvnw failsafe:integration-test failsafe:verify -pl .)",
+      "Bash(./mvnw failsafe:integration-test failsafe:verify -pl . -Dlogging.level.org.testcontainers=DEBUG)",
+      "Bash(javap -c \"org/testcontainers/shaded/com/github/dockerjava/core/RemoteApiVersion.class\")",
+      "Bash(javap -verbose \"org/testcontainers/shaded/com/github/dockerjava/core/RemoteApiVersion.class\")",
+      "Bash(javap -verbose \"org/testcontainers/shaded/com/github/dockerjava/core/DefaultDockerClientConfig.class\")",
+      "Bash(javap -verbose \"org/testcontainers/dockerclient/DockerClientProviderStrategy.class\")",
+      "Bash(javap -verbose \"org/testcontainers/shaded/com/github/dockerjava/zerodep/ZerodepDockerHttpClient.class\")",
+      "Bash(find ~/.m2 -name docker-java-transport-zerodep*.jar)",
+      "Bash(./mvnw dependency:tree -Dincludes=\"com.github.docker-java*,org.testcontainers*\")",
+      "Bash(./mvnw dependency:tree)",
+      "Bash(javap -c \"org/testcontainers/dockerclient/DockerClientProviderStrategy.class\")",
+      "Bash(javap -verbose \"org/testcontainers/utility/TestcontainersConfiguration.class\")",
+      "Bash(javap -verbose \"org/testcontainers/dockerclient/HeadersAddingDockerHttpClient.class\")",
+      "Bash(./mvnw failsafe:integration-test -pl . -Dlogging.level.com.ragnarok.antifraude=DEBUG -Dlogging.level.io.lettuce=DEBUG)",
+      "Bash(./mvnw compile:*)"
     ]
   }
 }

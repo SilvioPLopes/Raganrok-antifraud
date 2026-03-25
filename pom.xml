@@ -125,6 +125,12 @@
             <artifactId>postgresql</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Commons Pool2 — required for Lettuce connection pool (avoids virtual thread pinning) -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
         <!-- Testcontainers Redis — ESTAVA FALTANDO -->
         <dependency>
             <groupId>com.redis</groupId>
@@ -154,6 +160,10 @@
                     <includes>
                         <include>**/*IntegrationTest.java</include>
                     </includes>
+                    <systemPropertyVariables>
+                        <!-- Docker Desktop 4.35+ requires API >= 1.44; docker-java defaults to 1.43 -->
+                        <api.version>1.44</api.version>
+                    </systemPropertyVariables>
                 </configuration>
                 <executions>
                     <execution>

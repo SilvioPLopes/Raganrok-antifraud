@@ -32,17 +32,22 @@ import java.util.concurrent.TimeUnit;
 public class FraudAnalysisService implements FraudAnalysisUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(FraudAnalysisService.class);
-    private static final long TIMEOUT_MS = 50;
 
+    private final long timeoutMs;
     private final List<FraudRule> rules;
     private final AuditLogService auditLogService;
     private final ExecutorService executor;
     private final MeterRegistry meterRegistry;
 
-    public FraudAnalysisService(List<FraudRule> rules, AuditLogService auditLogService, MeterRegistry meterRegistry) {
+    public FraudAnalysisService(
+            List<FraudRule> rules,
+            AuditLogService auditLogService,
+            MeterRegistry meterRegistry,
+            @org.springframework.beans.factory.annotation.Value("${antifraude.rule.timeout.ms:50}") long timeoutMs) {
         this.rules = rules;
         this.auditLogService = auditLogService;
         this.meterRegistry = meterRegistry;
+        this.timeoutMs = timeoutMs;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
@@ -74,7 +79,7 @@ public class FraudAnalysisService implements FraudAnalysisUseCase {
         // 3. Espera todas com timeout
         CompletableFuture<Void> all = CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
         try {
-            all.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            all.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             log.debug("Some rules timed out for event {} — fail-open", event.eventId());
         }

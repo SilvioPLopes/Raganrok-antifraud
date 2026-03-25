@@ -35,7 +35,7 @@ class FraudAnalysisServiceTest {
     @Test
     @DisplayName("Nenhuma regra aplicável → APPROVED")
     void noApplicableRules_approved() {
-        var service = new FraudAnalysisService(List.of(), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(), auditLogService, meterRegistry, 50L);
         var result = service.analyze(event("UNKNOWN_EVENT"));
         assertEquals(Verdict.APPROVED, result.verdict());
     }
@@ -46,7 +46,7 @@ class FraudAnalysisServiceTest {
         FraudRule rule1 = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
         FraudRule rule2 = stubRule("R2", "ITEM_TRADE", RuleResult.approved("R2"));
 
-        var service = new FraudAnalysisService(List.of(rule1, rule2), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(rule1, rule2), auditLogService, meterRegistry, 50L);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.APPROVED, result.verdict());
     }
@@ -58,7 +58,7 @@ class FraudAnalysisServiceTest {
         FraudRule ruleBlock = stubRule("R2", "ITEM_TRADE",
             RuleResult.blocked("R2", RequiredAction.CANCEL_ACTION, RiskLevel.HIGH, "blocked"));
 
-        var service = new FraudAnalysisService(List.of(ruleOk, ruleBlock), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(ruleOk, ruleBlock), auditLogService, meterRegistry, 50L);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.BLOCKED, result.verdict());
         assertTrue(result.triggeredRules().contains("R2"));
@@ -77,7 +77,7 @@ class FraudAnalysisServiceTest {
             }
         };
 
-        var service = new FraudAnalysisService(List.of(slowRule), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(slowRule), auditLogService, meterRegistry, 50L);
         var result = service.analyze(event("ITEM_TRADE"));
         // Regra não retornou a tempo → ignorada → APPROVED
         assertEquals(Verdict.APPROVED, result.verdict());
@@ -95,7 +95,7 @@ class FraudAnalysisServiceTest {
             }
         };
 
-        var service = new FraudAnalysisService(List.of(crashingRule), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(crashingRule), auditLogService, meterRegistry, 50L);
         var result = service.analyze(event("ITEM_TRADE"));
         assertEquals(Verdict.APPROVED, result.verdict());
     }
@@ -104,7 +104,7 @@ class FraudAnalysisServiceTest {
     @DisplayName("analyze registra métrica fraud.decisions.total")
     void analyze_recordsDecisionCounterMetric() {
         FraudRule rule = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
-        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry, 50L);
 
         service.analyze(event("ITEM_TRADE"));
 
@@ -117,7 +117,7 @@ class FraudAnalysisServiceTest {
     @DisplayName("analyze registra métrica fraud.processing.duration")
     void analyze_recordsProcessingDurationMetric() {
         FraudRule rule = stubRule("R1", "ITEM_TRADE", RuleResult.approved("R1"));
-        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(rule), auditLogService, meterRegistry, 50L);
 
         service.analyze(event("ITEM_TRADE"));
 
@@ -131,7 +131,7 @@ class FraudAnalysisServiceTest {
         FraudRule ruleBlock = stubRule("R2", "ITEM_TRADE",
             RuleResult.blocked("R2", RequiredAction.CANCEL_ACTION, RiskLevel.HIGH, "blocked"));
 
-        var service = new FraudAnalysisService(List.of(ruleBlock), auditLogService, meterRegistry);
+        var service = new FraudAnalysisService(List.of(ruleBlock), auditLogService, meterRegistry, 50L);
         service.analyze(event("ITEM_TRADE"));
 
         Counter ruleCounter = meterRegistry.find("fraud.rule.triggered.total")

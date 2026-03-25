@@ -19,6 +19,9 @@ spring:
 
 antifraude:
   api-key:
+  rule:
+    timeout:
+      ms: 500  # Docker Desktop WSL2 adds ~60ms Redis latency; production Redis < 5ms
 
 logging:
   level:
