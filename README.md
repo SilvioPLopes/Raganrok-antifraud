@@ -1,304 +1,315 @@
 # ragnarok-antifraude
 
-Motor antifraude independente do `ragnarok-core`, construído em **Arquitetura Hexagonal (Ports & Adapters)** com Java 21 e Virtual Threads. Recebe eventos do jogo via REST e retorna uma decisão (`APPROVED`, `BLOCKED` ou `CHALLENGE`) dentro de **80ms garantidos no p99** — o jogo nunca trava por culpa do antifraude.
+An independent anti-fraud microservice for Ragnarok Online, built with **Hexagonal Architecture (Ports & Adapters)** using Java 21 and Virtual Threads. It receives game events via REST and returns a decision (`APPROVED`, `BLOCKED`, or `CHALLENGE`) within a guaranteed **p99 of 80ms** — the game never freezes waiting for the anti-fraud system.
 
 ---
 
-## Índice
+## Table of Contents
 
-- [O Problema](#o-problema)
-- [A Solução](#a-solução)
-- [Arquitetura](#arquitetura)
-- [As 9 Regras](#as-9-regras)
-- [Stack Tecnológica](#stack-tecnológica)
-- [Pré-requisitos](#pré-requisitos)
+- [The Problem](#the-problem)
+- [The Solution](#the-solution)
+- [Architecture](#architecture)
+- [The 9 Rules](#the-9-rules)
+- [Tech Stack](#tech-stack)
+- [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Endpoints da API](#endpoints-da-api)
-- [Integração com o ragnarok-core](#integração-com-o-ragnarok-core)
-- [Configuração](#configuração)
-- [Banco de Dados](#banco-de-dados)
+- [API Endpoints](#api-endpoints)
+- [Integration with ragnarok-core](#integration-with-ragnarok-core)
+- [Configuration](#configuration)
+- [Database](#database)
 - [Stress Test](#stress-test)
 - [Docker](#docker)
-- [Testes](#testes)
-- [Segurança](#segurança)
-- [Decisões Arquiteturais](#decisões-arquiteturais)
-- [Estrutura de Pastas](#estrutura-de-pastas)
+- [Tests](#tests)
+- [Security](#security)
+- [Architectural Decisions](#architectural-decisions)
+- [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
+- [Known Issues](#known-issues)
 - [Roadmap](#roadmap)
 
 ---
 
-## O Problema
+## The Problem
 
-Um motor antifraude que roda 9 regras em sequência antes de cada ação do jogador pode facilmente ultrapassar 100ms:
+An anti-fraud engine that runs 9 rules sequentially before each player action can easily exceed 100ms:
 
 ```
-Regra 1 (3ms) + Regra 2 (5ms) + ... + Regra 9 (3ms) = ~35ms sequencial
-+ overhead HTTP + serialização + acesso a banco = >100ms
+Rule 1 (3ms) + Rule 2 (5ms) + ... + Rule 9 (3ms) = ~35ms sequential
++ HTTP overhead + serialization + database access = >100ms
 ```
 
-Em um MMO como Ragnarok Online, 100ms de latência adicionados ao combate ou ao comércio de itens tornam o jogo injogável. Atacar um monstro, trocar um item, abrir uma vending — tudo congela esperando o antifraude responder.
+In an MMO like Ragnarok Online, 100ms of added latency on combat or item trading makes the game unplayable. Attacking a monster, trading an item, opening a vending shop — everything freezes while waiting for the anti-fraud system to respond.
 
-O desafio central é: **como rodar 9 verificações complexas sem que o jogador perceba que elas existem?**
+The central challenge: **how to run 9 complex checks without the player noticing they exist?**
 
 ---
 
-## A Solução
+## The Solution
 
-Quatro decisões arquiteturais eliminam o risco de latência:
+Four architectural decisions eliminate the latency risk:
 
-**1. Regras em paralelo com Virtual Threads (Java 21).**
-As 9 regras são disparadas ao mesmo tempo. O tempo total é o da regra *mais lenta* (≈ 5ms), não a soma de todas. Virtual Threads têm overhead próximo de zero para tarefas I/O-bound — cada regra roda em sua própria thread virtual sem custo de pool.
+**1. Rules run in parallel with Virtual Threads (Java 21).**
+All 9 rules are fired simultaneously. The total time equals the *slowest* rule (≈ 5ms), not the sum of all. Virtual Threads have near-zero overhead for I/O-bound tasks — each rule runs in its own virtual thread without pool cost.
 
-**2. Timeout hard de 50ms.**
-Se qualquer regra não retornar dentro de 50ms, é ignorada. O motor retorna `APPROVED` para as regras que completaram. O jogo nunca espera mais que 50ms pelo antifraude.
+**2. Hard 50ms timeout.**
+If any rule doesn't return within 50ms, it's ignored. The engine returns `APPROVED` for rules that completed. The game never waits more than 50ms for the anti-fraud system.
 
-**3. Redis como cache L1 para dados quentes.**
-Anti-dupe locks, sessões de farm, timing de cliques, país de login, preços de mercado — tudo vive no Redis com leituras sub-millisecond. O PostgreSQL só é acessado para dados frios (audit log, cooldowns de instância, seed de preços).
+**3. Redis as L1 cache for hot data.**
+Anti-dupe locks, farm sessions, click timing, login country, market prices — all live in Redis with sub-millisecond reads. PostgreSQL is only accessed for cold data (audit log, instance cooldowns, price seed).
 
-**4. Audit log 100% assíncrono.**
-A persistência do resultado no PostgreSQL acontece *depois* que a resposta já foi enviada ao ragnarok-core. O banco de dados nunca está no caminho crítico.
+**4. 100% async audit log.**
+Persisting the result to PostgreSQL happens *after* the response has already been sent to ragnarok-core. The database is never on the critical path.
 
 ```
-                    ┌─ Regra 1 (Redis SET NX)       ≈ 3ms ─┐
-                    ├─ Regra 2 (Redis GET price)     ≈ 5ms ─┤
-   FraudEvent ──────├─ Regra 3 (Redis HGET session)  ≈ 2ms ─├──→ FraudDecision
-   do ragnarok-core ├─ Regra 4 (Redis ZADD window)   ≈ 2ms ─┤    em < 50ms
-                    ├─ Regra 5 (payload check)        ≈ 1ms ─┤
-                    ├─ Regra 6 (Redis GET doc)        ≈ 5ms ─┤
-                    ├─ Regra 7 (PostgreSQL indexed)   ≈ 4ms ─┤
-                    ├─ Regra 8 (Redis HGET login)     ≈ 2ms ─┤
-                    └─ Regra 9 (payload math)         ≈ 3ms ─┘
-                                                              │
-                                      Audit log ──────────────┘ (async, fora do caminho crítico)
+                    ┌─ Rule 1 (Redis SET NX)        ≈ 3ms ─┐
+                    ├─ Rule 2 (Redis GET price)      ≈ 5ms ─┤
+   FraudEvent ──────├─ Rule 3 (Redis HGET session)   ≈ 2ms ─├──→ FraudDecision
+   from core        ├─ Rule 4 (Redis ZADD window)    ≈ 2ms ─┤    in < 50ms
+                    ├─ Rule 5 (payload check)         ≈ 1ms ─┤
+                    ├─ Rule 6 (Redis GET doc)         ≈ 5ms ─┤
+                    ├─ Rule 7 (PostgreSQL indexed)    ≈ 4ms ─┤
+                    ├─ Rule 8 (Redis HGET login)      ≈ 2ms ─┤
+                    └─ Rule 9 (payload math)          ≈ 3ms ─┘
+                                                             │
+                                     Audit log ─────────────┘ (async, off critical path)
 ```
 
 ---
 
-## Arquitetura
+## Architecture
 
-O projeto segue **Arquitetura Hexagonal** com 3 camadas e uma regra de dependência estrita:
+The project follows **Hexagonal Architecture** with 3 layers and a strict dependency rule:
 
 ```
-domain → (nada)
+domain → (nothing)
 application → domain
 infrastructure → application + domain
 ```
 
-O domain é puro Java — zero imports de Spring, Redis, JPA ou qualquer framework. Isso garante que a lógica de negócio é testável sem infraestrutura.
+The domain is pure Java — zero Spring, Redis, JPA, or framework imports. This ensures business logic is testable without any infrastructure.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  DOMAIN (puro Java)                                                 │
+│  DOMAIN (pure Java)                                                 │
 │                                                                     │
-│  model/          FraudEvent (record imutável)                       │
-│                  FraudDecision (record imutável)                     │
+│  model/          FraudEvent (immutable record)                      │
+│                  FraudDecision (immutable record)                   │
 │                  Verdict, RequiredAction, RiskLevel (enums)         │
 │                                                                     │
-│  rule/           FraudRule (interface) + RuleResult (record)         │
+│  rule/           FraudRule (interface) + RuleResult (record)        │
 │                                                                     │
 │  port/in/        FraudAnalysisUseCase                               │
 │  port/out/       TransactionRepository                              │
-│                  PlayerActivityRepository                            │
-│                  AuditRepository                                     │
+│                  PlayerActivityRepository                           │
+│                  AuditRepository                                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  APPLICATION (orquestração)                                         │
+│  APPLICATION (orchestration)                                        │
 │                                                                     │
-│  service/        FraudAnalysisService (motor paralelo)              │
-│                  AuditLogService (persistência assíncrona)           │
+│  service/        FraudAnalysisService (parallel engine)             │
+│                  AuditLogService (async persistence)                │
 │                                                                     │
 │  rule/           AntiDupeRule, DisproportionateTransferRule,        │
-│                  BotFarmTimeRule, BotClickSpeedRule,                 │
-│                  RegistrationValidationRule, CashSecurityRule,       │
-│                  InstanceCooldownRule, ImpossibleTravelRule,         │
-│                  MarketMonopolyRule                                  │
+│                  BotFarmTimeRule, BotClickSpeedRule,                │
+│                  RegistrationValidationRule, CashSecurityRule,      │
+│                  InstanceCooldownRule, ImpossibleTravelRule,        │
+│                  MarketMonopolyRule                                 │
 ├─────────────────────────────────────────────────────────────────────┤
-│  INFRASTRUCTURE (implementações concretas)                          │
+│  INFRASTRUCTURE (concrete implementations)                          │
 │                                                                     │
 │  adapter/in/     FraudController (POST /api/fraud/analyze)          │
-│    rest/         PlayerStateController (sync de estado)              │
-│                  AdminDashboardController (GMs)                      │
-│                  DTOs + Mapper                                       │
+│    rest/         PlayerStateController (state sync)                 │
+│                  AdminDashboardController (GMs)                     │
+│                  SimulationController (scenario testing)            │
+│                  DTOs + Mapper                                      │
 │                                                                     │
-│  adapter/out/    RedisTransactionAdapter                             │
-│    redis/        RedisPlayerActivityAdapter                          │
+│  adapter/out/    RedisTransactionAdapter                            │
+│    redis/        RedisPlayerActivityAdapter                         │
 │                                                                     │
-│  adapter/out/    JpaAuditAdapter                                     │
-│    persistence/  FraudAuditEntity + FraudAuditJpaRepository          │
+│  adapter/out/    JpaAuditAdapter                                    │
+│    persistence/  FraudAuditEntity + FraudAuditJpaRepository         │
 │                                                                     │
-│  config/         AsyncConfig (pools de thread)                       │
-│                  ApiKeyFilter (autenticação inter-serviço)           │
+│  config/         AsyncConfig (thread pools)                         │
+│                  ApiKeyFilter (inter-service auth)                  │
 │                                                                     │
-│  scheduler/      MarketPriceRefresher (PostgreSQL → Redis a cada 5m)│
+│  scheduler/      MarketPriceRefresher (PostgreSQL → Redis every 5m) │
+│  simulation/     SimulationService (10 fraud scenarios)             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## As 9 Regras
+## The 9 Rules
 
-Cada regra implementa a interface `FraudRule` com try/catch interno — se falhar, retorna `APPROVED` (fail-open). Todas são stateless e thread-safe.
+Each rule implements the `FraudRule` interface with internal try/catch — if it fails, it returns `APPROVED` (fail-open). All rules are stateless and thread-safe.
 
-### Regra 1 — Anti-Dupe (`ANTI_DUPE`)
+### Rule 1 — Anti-Dupe (`ANTI_DUPE`)
 
-Impede clonagem de itens. Usa Redis `SET NX` atômico no UUID do item com TTL de 500ms. Se o mesmo UUID aparecer duas vezes nessa janela, a segunda transação é bloqueada.
+Prevents item cloning. Uses an atomic Redis `SET NX` on the item UUID with a 500ms TTL. If the same UUID appears twice in that window, the second transaction is blocked.
 
 - **EventType:** `ITEM_TRADE`
-- **Ação:** `CANCEL_ACTION`
+- **Action:** `CANCEL_ACTION`
 - **Storage:** Redis
-- **Latência:** < 3ms
+- **Latency:** < 3ms
 
-### Regra 2 — Transferências Desproporcionais (`DISPROPORTIONATE_TRANSFER`)
+### Rule 2 — Disproportionate Transfer (`DISPROPORTIONATE_TRANSFER`)
 
-Compara o valor em zenys da troca com o preço mediano de mercado do item (cache no Redis, atualizado a cada 5 minutos pelo `MarketPriceRefresher`).
+Compares the zeny value of a trade against the item's median market price (Redis cache, updated every 5 minutes by `MarketPriceRefresher`).
 
 - **EventType:** `ITEM_TRADE`
 - **Thresholds:** ratio > 100x → `FLAG_FOR_REVIEW` | > 1000x → `CANCEL_ACTION` | > 10000x → `CANCEL_ACTION` + `CRITICAL`
-- **Storage:** Redis (preços cacheados)
-- **Latência:** < 5ms
+- **Storage:** Redis (cached prices)
+- **Latency:** < 5ms
 
-### Regra 3 — Detector de Bot por Tempo (`BOT_FARM_TIME`)
+### Rule 3 — Bot Farm Time (`BOT_FARM_TIME`)
 
-Detecta farm contínuo no mesmo mapa. O ragnarok-core envia heartbeats periódicos; o antifraude calcula a duração da sessão.
+Detects continuous farming on the same map. ragnarok-core sends periodic heartbeats; the anti-fraud calculates session duration.
 
 - **EventType:** `FARM_HEARTBEAT`
 - **Thresholds:** > 6h → `SHOW_CAPTCHA` | > 12h → `FLAG_FOR_REVIEW` | > 24h → `DROP_SESSION`
-- **Storage:** Redis (timestamp de início da sessão)
-- **Latência:** < 2ms
+- **Storage:** Redis (session start timestamp)
+- **Latency:** < 2ms
 
-### Regra 4 — Detector de Bot por Clique (`BOT_CLICK_SPEED`)
+### Rule 4 — Bot Click Speed (`BOT_CLICK_SPEED`)
 
-Analisa ações por segundo (APS) e o desvio padrão dos intervalos entre cliques. Humanos têm timing irregular; bots têm timing roboticamente regular (stddev < 5ms).
+Analyzes actions per second (APS) and the standard deviation of click intervals. Humans have irregular timing; bots have robotically regular timing (stddev < 5ms). Uses a real sliding window (Redis sorted set, last 10s).
 
 - **EventType:** `CLICK_ACTION`
-- **Thresholds:** APS > 15 → `SHOW_CAPTCHA` | APS > 25 ou stddev < 5ms → `FLAG_FOR_REVIEW`
-- **Storage:** Redis (sorted set com sliding window de 10s)
-- **Latência:** < 2ms
+- **Thresholds:** APS > 15 → `SHOW_CAPTCHA` | APS > 25 or stddev < 5ms → `FLAG_FOR_REVIEW`
+- **Storage:** Redis (sorted set with 10s sliding window)
+- **Latency:** < 2ms
 
-### Regra 5 — Validação de Cadastro (`REGISTRATION_VALIDATION`)
+### Rule 5 — Registration Validation (`REGISTRATION_VALIDATION`)
 
-Verifica se o email foi confirmado e se o jogador atende o requisito de maioridade antes de permitir o login.
+Verifies that the email was confirmed and the player meets the age requirement before allowing login.
 
 - **EventType:** `SESSION_LOGIN`, `ACCOUNT_REGISTRATION`
-- **Ação:** `CANCEL_ACTION`
-- **Storage:** Nenhum (dados no payload)
-- **Latência:** < 1ms
+- **Action:** `CANCEL_ACTION`
+- **Storage:** None (data in payload)
+- **Latency:** < 1ms
 
-### Regra 6 — Segurança de Cash (`CASH_SECURITY`)
+### Rule 6 — Cash Security (`CASH_SECURITY`)
 
-Bloqueia compras de cash (ROPs) se o CPF/CNPJ informado no billing não bate com o documento cadastrado do titular da conta.
+Blocks cash purchases (ROPs) if the CPF/CNPJ provided in billing does not match the registered account holder's document.
 
 - **EventType:** `CASH_PURCHASE`
-- **Ação:** `CANCEL_ACTION`
-- **Storage:** Redis (documento do jogador)
-- **Latência:** < 5ms
+- **Action:** `CANCEL_ACTION`
+- **Storage:** Redis (player document)
+- **Latency:** < 5ms
 
-### Regra 7 — Cooldown de Instâncias (`INSTANCE_COOLDOWN`)
+### Rule 7 — Instance Cooldown (`INSTANCE_COOLDOWN`)
 
-Impede reentrada em mapas especiais (MVP rooms, calabouços de alto nível) antes do cooldown expirar. Cooldowns são de dias ou semanas.
+Prevents re-entry into special maps (MVP rooms, high-level dungeons) before the cooldown expires. Cooldowns range from days to weeks.
 
 - **EventType:** `MAP_INSTANCE_ENTRY`
-- **Ação:** `CANCEL_ACTION`
-- **Storage:** PostgreSQL (dados duráveis que sobrevivem a restart) + Redis (cache)
-- **Latência:** < 4ms
+- **Action:** `CANCEL_ACTION`
+- **Storage:** PostgreSQL (durable, survives restarts) + Redis (cache)
+- **Latency:** < 4ms
 
-### Regra 8 — Viagem Impossível (`IMPOSSIBLE_TRAVEL`)
+> **Known issue:** `recordInstanceEntry()` currently only writes to Redis. PostgreSQL persistence (source of truth) is not yet implemented — cooldowns are lost on Redis restart.
 
-Se o país de login muda em menos de 2 horas, a conta provavelmente foi comprometida. A sessão é derrubada imediatamente.
+### Rule 8 — Impossible Travel (`IMPOSSIBLE_TRAVEL`)
+
+If the login country changes in less than 2 hours, the account was likely compromised. The session is immediately dropped.
 
 - **EventType:** `SESSION_LOGIN`
-- **Ação:** `DROP_SESSION`
-- **Storage:** Redis (último país + timestamp)
-- **Latência:** < 2ms
+- **Action:** `DROP_SESSION`
+- **Storage:** Redis (last country + timestamp)
+- **Latency:** < 2ms
 
-### Regra 9 — Monopólio de Mercado (`MARKET_MONOPOLY`)
+### Rule 9 — Market Monopoly (`MARKET_MONOPOLY`)
 
-Detecta tentativas de comprar uma fatia desproporcional do estoque de um item para manipular a economia do jogo.
+Detects attempts to buy a disproportionate share of an item's stock to manipulate the game economy.
 
 - **EventType:** `MARKET_PURCHASE`
-- **Thresholds:** > 80% do estoque → `ALERT_ONLY` | > 95% → `FLAG_FOR_REVIEW`
-- **Storage:** Nenhum (cálculo sobre o payload)
-- **Latência:** < 3ms
+- **Thresholds:** > 80% of stock → `ALERT_ONLY` | > 95% → `FLAG_FOR_REVIEW`
+- **Storage:** None (math on payload)
+- **Latency:** < 3ms
 
 ---
 
-## Stack Tecnológica
+## Tech Stack
 
-| Componente | Tecnologia | Motivo |
+| Component | Technology | Reason |
 |-----------|-----------|--------|
-| Runtime | Java 21 + Virtual Threads | Paralelismo massivo sem overhead de thread pool |
-| Framework | Spring Boot 3.2.5 | Ecossistema maduro, compatível com Java 21 |
-| Banco (frio) | PostgreSQL 16 | Audit log, cooldowns, seed de preços |
-| Cache (quente) | Redis 7 | Sub-millisecond reads para todas as regras de estado |
-| Cache (L1) | Caffeine | In-process cache para dados lidos constantemente |
-| Migrations | Flyway | Versionamento de schema automático |
-| Build | Maven Wrapper | Sem dependência de Maven instalado |
+| Runtime | Java 21 + Virtual Threads | Massive parallelism without thread pool overhead |
+| Framework | Spring Boot 3.2.5 | Mature ecosystem, Java 21 compatible |
+| Cold storage | PostgreSQL 16 | Audit log, cooldowns, price seed |
+| Hot cache | Redis 7 | Sub-millisecond reads for all stateful rules |
+| L1 cache | Caffeine | In-process cache for constantly read data |
+| Migrations | Flyway | Automatic schema versioning |
+| Build | Maven Wrapper | No installed Maven required |
 | Container | Docker multi-stage | JRE-only, non-root, ZGC, ~200MB |
-| GC | ZGC | Pausas < 1ms — ideal para latência |
-| API Docs | springdoc-openapi | Swagger UI automático |
-| Testes | JUnit 5 + Testcontainers | Integração com PostgreSQL e Redis reais |
-| Cobertura | JaCoCo | Relatório de cobertura no build |
+| GC | ZGC | < 1ms pauses — ideal for latency-sensitive workloads |
+| API Docs | springdoc-openapi | Automatic Swagger UI |
+| Metrics | Micrometer + Prometheus | p99 latency, verdict counts, rule counters |
+| Dashboards | Grafana | Pre-provisioned dashboards on port 3000 |
+| Tests | JUnit 5 + Testcontainers | Integration with real PostgreSQL and Redis |
+| Coverage | JaCoCo | Coverage report on build |
 
 ---
 
-## Pré-requisitos
+## Prerequisites
 
-Para rodar com Docker (recomendado): apenas **Docker** e **Docker Compose**.
+**To run with Docker (recommended):** only **Docker** and **Docker Compose**.
 
-Para rodar local sem Docker: Java 21+ (JDK), PostgreSQL 16+ na porta 5432, Redis 7+ na porta 6379.
+**To run locally without Docker:** Java 21+ (JDK), PostgreSQL 16+ on port 5432, Redis 7+ on port 6379.
 
 ---
 
 ## Quick Start
 
-### Com Docker (recomendado)
+### With Docker (recommended)
 
 ```bash
-# Sobe PostgreSQL + Redis + antifraude
-docker compose up -d
+# Start PostgreSQL + Redis + antifraude
+docker compose up -d postgres redis antifraude
 
-# Verifica se está healthy
+# Check health
 docker compose ps
 
-# Acompanha os logs
+# Follow logs
 docker compose logs -f antifraude
 
-# Testa o health check
+# Test the health endpoint
 curl http://localhost:8081/api/fraud/health
 ```
 
-### Local (sem Docker)
+> **Important:** To stop without losing data, always use `docker compose stop`. Never use `docker compose down -v` unless you want to reset everything — it destroys all volumes including the database.
+
+### Local (dev mode — connects to Docker PostgreSQL/Redis)
 
 ```bash
-# 1. Criar o banco
-createdb ragnarok_antifraude_db
+# 1. Start only the infrastructure
+docker compose up -d postgres redis
 
 # 2. Build
-./mvnw clean install
+./mvnw clean install -DskipTests
 
-# 3. Rodar (porta 8081)
-DB_PASS=sua_senha java -jar target/ragnarok-antifraude-0.0.1-SNAPSHOT.jar
+# 3. Run (port 8081)
+# Note: Docker maps PostgreSQL to external port 5433
+SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/ragnarok_antifraude_db \
+DB_PASS=postgre ANTIFRAUDE_API_KEY=dev-key-123 ./mvnw spring-boot:run
 
-# 4. Verificar
+# 4. Verify
 curl http://localhost:8081/api/fraud/health
 ```
 
 ### Swagger UI
 
-Com o serviço rodando: [http://localhost:8081/swagger-ui.html](http://localhost:8081/swagger-ui.html)
+With the service running: [http://localhost:8081/swagger-ui.html](http://localhost:8081/swagger-ui.html) (no API key required)
 
 ---
 
-## Endpoints da API
+## API Endpoints
 
-### Análise de Fraude
+### Fraud Analysis
 
-O endpoint principal. O ragnarok-core chama este endpoint **antes** de commitar qualquer ação sensível.
+The main endpoint. ragnarok-core calls this **before** committing any sensitive action.
 
 ```
 POST /api/fraud/analyze
 Content-Type: application/json
-X-API-Key: sua-chave (se configurada)
+X-API-Key: your-key
 ```
 
 **Request:**
@@ -309,7 +320,7 @@ X-API-Key: sua-chave (se configurada)
   "playerId": 12345,
   "ipAddress": "200.100.50.25",
   "countryCode": "BR",
-  "occurredAt": "2025-01-15T14:30:00Z",
+  "occurredAt": "2026-03-27T14:30:00Z",
   "payload": {
     "itemId": 4324,
     "itemUuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -318,7 +329,7 @@ X-API-Key: sua-chave (se configurada)
 }
 ```
 
-**Response (aprovado):**
+**Response (approved):**
 ```json
 {
   "eventId": "550e8400-e29b-41d4-a716-446655440000",
@@ -332,7 +343,7 @@ X-API-Key: sua-chave (se configurada)
 }
 ```
 
-**Response (bloqueado):**
+**Response (blocked):**
 ```json
 {
   "eventId": "550e8400-e29b-41d4-a716-446655440000",
@@ -340,16 +351,16 @@ X-API-Key: sua-chave (se configurada)
   "verdict": "BLOCKED",
   "requiredAction": "CANCEL_ACTION",
   "riskLevel": "CRITICAL",
-  "triggeredRules": ["ANTI_DUPE", "DISPROPORTIONATE_TRANSFER"],
+  "triggeredRules": ["ANTI_DUPE"],
   "reason": "Duplicate item trade detected: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "processingTimeMs": 4
 }
 ```
 
-**Event Types suportados:**
+**Supported Event Types:**
 
-| EventType | Regras ativadas | Campos obrigatórios no payload |
-|-----------|----------------|-------------------------------|
+| EventType | Rules triggered | Required payload fields |
+|-----------|----------------|------------------------|
 | `ITEM_TRADE` | 1, 2 | `itemId`, `itemUuid`, `zenysValue` |
 | `CLICK_ACTION` | 4 | `actionsPerSecond`, `networkLatencyMs` |
 | `FARM_HEARTBEAT` | 3 | `mapId` |
@@ -359,9 +370,9 @@ X-API-Key: sua-chave (se configurada)
 | `MAP_INSTANCE_ENTRY` | 7 | `mapId` |
 | `MARKET_PURCHASE` | 9 | `itemId`, `quantityRequested`, `totalInStock` |
 
-### Sync de Estado (fire-and-forget)
+### State Sync (fire-and-forget)
 
-O ragnarok-core chama estes endpoints de forma assíncrona para manter o antifraude atualizado. Se falharem, não afetam o jogo.
+ragnarok-core calls these endpoints asynchronously to keep the anti-fraud state up to date. If they fail, the game is not affected.
 
 ```
 POST /api/fraud/state/player/{id}/map-leave?mapId=prt_maze03
@@ -372,9 +383,19 @@ POST /api/fraud/state/player/{id}/registration
      Body: { "emailVerified": true, "ageVerified": true, "document": "123.456.789-00" }
 ```
 
+### Simulation
+
+Run predefined fraud scenarios for manual testing. No API key required in dev mode.
+
+```
+POST /api/simulate/{scenario}?count=50
+```
+
+Available scenarios: `normal-traffic`, `item-dupe`, `disproportionate-transfer`, `bot-farm`, `bot-attack`, `unregistered-account`, `cash-fraud`, `instance-spam`, `impossible-travel`, `market-monopoly`
+
 ### Admin / Dashboard
 
-Endpoints para game masters investigarem jogadores suspeitos.
+Endpoints for game masters investigating suspicious players.
 
 ```
 GET /api/fraud/admin/player/{id}/history?limit=50
@@ -387,28 +408,32 @@ GET /api/fraud/admin/player/{id}/blocks?hours=24
 GET /api/fraud/health
 ```
 
+Public endpoint — no API key required.
+
 ---
 
-## Integração com o ragnarok-core
+## Integration with ragnarok-core
 
-O diretório `integration-core/` contém os arquivos que devem ser copiados para **dentro** do ragnarok-core:
+The `integration-core/` directory contains files that must be copied **into** ragnarok-core:
 
-| Arquivo | Destino no ragnarok-core | Função |
-|---------|--------------------------|--------|
-| `FraudClient.java` | `com/ragnarok/infrastructure/antifraude/` | Client HTTP com Circuit Breaker + fallback |
-| `UsageExamples.java` | mesmo pacote | Exemplos de uso em BattleService, ItemService, MapService, LoginService |
-| `application-antifraude.yml` | merge no `application.yml` do core | Configuração do Resilience4j (CB + timeout) |
+| File | Destination in ragnarok-core | Purpose |
+|------|------------------------------|---------|
+| `FraudClient.java` | `com/ragnarok/infrastructure/antifraude/` | HTTP client with Circuit Breaker + fallback |
+| `UsageExamples.java` | same package | Usage examples in BattleService, ItemService, MapService, LoginService |
+| `application-antifraude.yml` | merge into core's `application.yml` | Resilience4j configuration (CB + timeout) |
 
-**Dependências a adicionar no pom.xml do ragnarok-core:**
+> **Current status:** The `FraudClient.java` currently deployed in ragnarok-core is a **stub** that always returns `FALLBACK_APPROVED` without making any HTTP call. The real implementation (with RestTemplate, CircuitBreaker, and actual HTTP calls) is ready in `integration-core/FraudClient.java` and needs to replace the stub.
+
+**Dependencies to add to ragnarok-core's pom.xml:**
 
 ```xml
-<!-- WebClient para chamadas HTTP -->
+<!-- WebClient for async fire-and-forget state sync -->
 <dependency>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-webflux</artifactId>
 </dependency>
 
-<!-- Resilience4j para circuit breaker -->
+<!-- Resilience4j for circuit breaker -->
 <dependency>
     <groupId>io.github.resilience4j</groupId>
     <artifactId>resilience4j-spring-boot3</artifactId>
@@ -416,12 +441,12 @@ O diretório `integration-core/` contém os arquivos que devem ser copiados para
 </dependency>
 ```
 
-**Filosofia da integração:** o antifraude é uma camada de proteção *adicional*. O `FraudClient` tem Circuit Breaker com fallback para `APPROVED` — se o antifraude cair, o jogo continua funcionando normalmente. Nenhuma ação do jogador é bloqueada por indisponibilidade do antifraude.
+**Integration philosophy:** the anti-fraud is an *additional* protection layer. The `FraudClient` has a Circuit Breaker with fallback to `APPROVED` — if the anti-fraud goes down, the game continues normally. No player action is ever blocked due to anti-fraud unavailability.
 
-**Exemplo mínimo de uso no ragnarok-core:**
+**Minimal usage example in ragnarok-core:**
 
 ```java
-// Em qualquer Service do ragnarok-core
+// In any Service in ragnarok-core
 FraudClient.FraudDecision decision = fraudClient.checkItemTrade(
     playerId, itemId, itemUuid, zenysValue
 );
@@ -430,179 +455,205 @@ if (decision.isBlocked()) {
     throw new FraudBlockedException(decision.getReason());
 }
 
-// Continua a lógica normal...
+// Continue normal logic...
 ```
 
 ---
 
-## Configuração
+## Configuration
 
-### Variáveis de Ambiente
+### Environment Variables
 
-| Variável | Padrão | Descrição |
-|----------|--------|-----------|
-| `DB_PASS` | `postgre` | Senha do PostgreSQL |
-| `REDIS_HOST` | `localhost` | Host do Redis |
-| `REDIS_PORT` | `6379` | Porta do Redis |
-| `REDIS_PASS` | (vazio) | Senha do Redis (opcional) |
-| `ANTIFRAUDE_API_KEY` | (vazio) | API key para autenticação. Se vazio, filtro desabilitado |
-| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/ragnarok_antifraude_db` | URL completa do banco |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/ragnarok_antifraude_db` | Full database URL. Override to `localhost:5433` when connecting to Docker from local JVM |
+| `DB_PASS` | `postgre` | PostgreSQL password |
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_PASS` | (empty) | Redis password (optional) |
+| `ANTIFRAUDE_API_KEY` | (empty) | API key for authentication. If empty, filter is disabled (dev mode) |
 
-### application.yml
-
-O serviço roda na **porta 8081** (o ragnarok-core usa 8080). Configuração completa em `src/main/resources/application.yml`.
+The service runs on **port 8081** (ragnarok-core uses 8080).
 
 ---
 
-## Banco de Dados
+## Database
 
-O Flyway gerencia o schema automaticamente no boot. Duas migrations incluídas:
+Flyway manages the schema automatically on boot. Two migrations included:
 
-**V1 — Schema inicial:** tabela `fraud_audit_log` (append-only, indexada por player_id, created_at, verdict), tabela `market_prices` (preços medianos por item), tabela `player_instance_cooldown` (cooldowns com unique constraint em player_id + map_id).
+**V1 — Initial schema:** `fraud_audit_log` table (append-only, indexed by player_id, created_at, verdict), `market_prices` table (median prices per item), `player_instance_cooldown` table (cooldowns with unique constraint on player_id + map_id).
 
-**V2 — Seed de preços:** ~35 itens com preços reais baseados em bRO/iRO. Equipamentos comuns (Sword 100z), mid-tier (Gae Bolg 200kz), cartas raras (Golden Bug 2Mz), cartas MVP (Kiel-D-01 30Mz, Thanatos 35Mz). A Regra 2 funciona desde o primeiro boot.
+**V2 — Price seed:** ~35 items with real prices based on bRO/iRO. Common equipment (Sword 100z), mid-tier (Gae Bolg 200kz), rare cards (Golden Bug 2Mz), MVP cards (Kiel-D-01 30Mz, Thanatos 35Mz). Rule 2 works from the first boot.
 
-O `MarketPriceRefresher` sincroniza preços do PostgreSQL para o Redis a cada 5 minutos. As regras leem apenas do Redis.
+`MarketPriceRefresher` syncs prices from PostgreSQL to Redis every 5 minutes. Rules read only from Redis.
 
 ---
 
 ## Stress Test
 
-O script `scripts/stress_test.sh` simula carga real de um MMO:
+The `scripts/stress_test.sh` script simulates real MMO load:
 
 ```bash
 chmod +x scripts/stress_test.sh
 
-# Padrão: 1000 requests, 50 concorrentes
+# Default: 1000 requests, 50 concurrent
 ./scripts/stress_test.sh
 
-# Carga pesada
+# Heavy load
 ./scripts/stress_test.sh 5000 200
 
-# Stress extremo (detecta gargalos de pool)
+# Extreme stress (detects pool bottlenecks)
 ./scripts/stress_test.sh 10000 500
 ```
 
-**Distribuição de tráfego simulado:**
+**Simulated traffic distribution:**
 
-| Cenário | Proporção | Tipo |
-|---------|-----------|------|
-| Trocas normais | 60% | `ITEM_TRADE` limpo |
-| Cliques de combate | 15% | `CLICK_ACTION` com APS variado |
-| Logins | 10% | `SESSION_LOGIN` de países aleatórios |
-| Ataques de dupe | 10% | `ITEM_TRADE` com UUID fixo |
-| Zeny bombs | 5% | `ITEM_TRADE` com 1B zenys |
+| Scenario | Proportion | Type |
+|----------|-----------|------|
+| Normal trades | 60% | Clean `ITEM_TRADE` |
+| Combat clicks | 15% | `CLICK_ACTION` with varied APS |
+| Logins | 10% | `SESSION_LOGIN` from random countries |
+| Dupe attacks | 10% | `ITEM_TRADE` with fixed UUID |
+| Zeny bombs | 5% | `ITEM_TRADE` with 1B zenys |
 
-**SLA esperado:**
+**Expected SLA:**
 
-| Métrica | Target |
-|---------|--------|
+| Metric | Target |
+|--------|--------|
 | p95 | < 50ms |
 | p99 | < 80ms |
-| Taxa de erro | < 1% |
+| Error rate | < 1% |
 | Timeouts (> 5s) | 0 |
 
-O script gera um relatório completo com latências, distribuição de verdicts e avaliação automática de pass/fail contra o SLA. Pré-requisitos: `curl`, `jq`, `bc`. Opcionalmente `GNU parallel` para máxima concorrência.
+The script generates a full report with latencies, verdict distribution, and automatic pass/fail evaluation against the SLA. Prerequisites: `curl`, `jq`, `bc`. Optionally `GNU parallel` for maximum concurrency.
 
 ---
 
 ## Docker
 
-### Build e execução
+### Build and run
 
 ```bash
-# Sobe tudo
+# Start everything
 docker compose up -d
 
-# Só o antifraude (sobe dependências automaticamente)
-docker compose up antifraude
+# Start only infrastructure (avoids port :3000 conflict with front)
+docker compose up -d postgres redis
 
-# Logs
+# Follow antifraude logs
 docker compose logs -f antifraude
 
-# Destrói tudo incluindo volumes
+# Stop without losing data
+docker compose stop
+
+# Reset everything including volumes (destructive — loses all data)
 docker compose down -v
 ```
 
-### Detalhes do Dockerfile
+### Dockerfile details
 
-O build é multi-stage: compilação com JDK 21, runtime com JRE 21 (~200MB). Roda como usuário não-root (`antifraude`). ZGC com pausas < 1ms. MaxRAMPercentage=75% para se adaptar ao limite do container. SecureRandom otimizado para UUID generation rápida sob carga.
+Multi-stage build: compilation with JDK 21, runtime with JRE 21 (~200MB). Runs as non-root user (`antifraude`). ZGC with < 1ms pauses. MaxRAMPercentage=75% to adapt to container memory limits. Optimized SecureRandom for fast UUID generation under load.
 
-### Serviços no compose
+### Compose services
 
-| Serviço | Imagem | Porta | Função |
-|---------|--------|-------|--------|
-| `postgres` | postgres:16-alpine | 5432 | Dois databases via init script |
-| `redis` | redis:7-alpine | 6379 | Cache de estado, 256MB, allkeys-lru |
-| `antifraude` | build local | 8081 | Microsserviço antifraude |
+| Service | Image | External port | Purpose |
+|---------|-------|---------------|---------|
+| `postgres` | postgres:16-alpine | **5433** | Database (maps 5433→5432 to avoid conflict with ragnarok-core) |
+| `redis` | redis:7-alpine | 6379 | State cache, 256MB, allkeys-lru |
+| `antifraude` | local build | 8081 | Anti-fraud microservice |
+| `prometheus` | prom/prometheus | 9090 | Metrics scraping (every 15s) |
+| `grafana` | grafana/grafana | 3000 | Pre-provisioned dashboards (admin/admin) |
+
+> **Port conflict:** Grafana and ragnarok-front both use port 3000. Never run both at the same time. For development, use `docker compose up -d postgres redis` and run the front with `pnpm dev`.
+
+### Observability
+
+- **Prometheus:** http://localhost:9090
+- **Grafana:** http://localhost:3000 (admin/admin) — dashboards auto-provisioned
+- **Actuator:** http://localhost:8081/actuator/health, `/actuator/prometheus`
 
 ---
 
-## Testes
+## Tests
 
 ```bash
-# Todos os testes
-./mvnw test
-
-# Só unitários (sem Docker)
+# Unit tests only (no Docker required)
 ./mvnw test -Dtest="FraudRulesUnitTest,FraudAnalysisServiceTest"
 
-# Só integração (requer Docker — Testcontainers sobe PostgreSQL e Redis)
+# Simulation tests (no Docker required)
+./mvnw test -Dtest="SimulationControllerTest,SimulationServiceTest,SimulationResultTest"
+
+# Integration tests (requires Docker Desktop running)
 ./mvnw test -Dtest="FraudControllerIntegrationTest"
 
-# Relatório de cobertura (JaCoCo)
-# target/site/jacoco/index.html
+# Coverage report (JaCoCo)
+./mvnw verify
+# Report at: target/site/jacoco/index.html
 ```
 
-**Cobertura:** `FraudRulesUnitTest` (cada regra isolada com mocks, testa aprovação/bloqueio/thresholds/fail-open), `FraudAnalysisServiceTest` (motor paralelo, timeout, combinação de resultados), `FraudControllerIntegrationTest` (ciclo completo com bancos reais via Testcontainers).
+**Test status:**
+
+| Suite | Status | Prerequisite |
+|-------|--------|-------------|
+| Unit (rules) — 25 tests | ✅ Passing | None |
+| Simulation — 6 tests | ✅ Passing | None |
+| Integration | ⚠️ Requires Docker Engine | Docker Desktop running |
+
+**Coverage:** `FraudRulesUnitTest` (each rule isolated with mocks, tests approval/blocking/thresholds/fail-open), `FraudAnalysisServiceTest` (parallel engine, timeout, result combination), `FraudControllerIntegrationTest` (full cycle with real databases via Testcontainers).
+
+> **Note:** Unit tests for rules 4 (BotClickSpeed), 6 (CashSecurity), and 7 (InstanceCooldown) are not yet written.
+
+> If `./mvnw clean install` fails with a `TypeTag::UNKNOWN` lock error, stop any running instance of the application before rebuilding.
 
 ---
 
-## Segurança
+## Security
 
-**Autenticação inter-serviço:** todos os endpoints (exceto `/api/fraud/health` e `/swagger-ui`) são protegidos pelo `ApiKeyFilter`. O ragnarok-core envia a chave via header `X-API-Key`. Se `ANTIFRAUDE_API_KEY` não for configurada, o filtro é desabilitado (modo dev).
+**Inter-service authentication:** all endpoints (except `/api/fraud/health` and `/swagger-ui`) are protected by `ApiKeyFilter`. ragnarok-core sends the key via the `X-API-Key` header. If `ANTIFRAUDE_API_KEY` is not configured, the filter is disabled (dev mode).
 
-**Fail-open:** o antifraude nunca bloqueia o jogo por falha própria. Timeouts, Redis down, exceções internas — tudo resulta em `APPROVED`.
+**Fail-open:** the anti-fraud never blocks the game due to its own failure. Timeouts, Redis down, internal exceptions — all result in `APPROVED`.
 
-**Thread-safety:** `FraudEvent` e `FraudDecision` são records imutáveis. As regras são stateless. Zero estado mutável compartilhado.
+**Thread safety:** `FraudEvent` and `FraudDecision` are immutable records. Rules are stateless. Zero shared mutable state.
 
-**Container seguro:** usuário não-root, JRE-only (sem compilador), sem shell root.
-
----
-
-## Decisões Arquiteturais
-
-| Decisão | Motivo | Alternativa rejeitada |
-|---------|--------|-----------------------|
-| Microsserviço separado | Falha do antifraude não derruba o jogo | Biblioteca embutida — acoplamento |
-| Hexagonal | Domain testável sem infra, adapters substituíveis | Layered — domain acoplado ao framework |
-| Virtual Threads | Zero overhead por thread I/O-bound | Platform threads — precisa tunar pool |
-| Redis para estado quente | Sub-millisecond, atômico (SET NX) | Caffeine local — não funciona multi-instância |
-| PostgreSQL para dados frios | Durável, transacional, SQL completo | Redis persistido — menos garantias ACID |
-| Audit async | Banco fora do caminho crítico | Síncrono — adiciona 5-20ms |
-| Fail-open em tudo | Jogo > antifraude | Fail-closed — qualquer falha bloqueia jogadores |
-| ZGC | Pausas < 1ms | G1GC — pausas de 10-50ms sob pressão |
-| Records imutáveis | Thread-safety por construção | Classes mutáveis + synchronized |
+**Secure container:** non-root user, JRE-only (no compiler), no root shell.
 
 ---
 
-## Estrutura de Pastas
+## Architectural Decisions
+
+| Decision | Reason | Rejected alternative |
+|----------|--------|----------------------|
+| Separate microservice | Anti-fraud failure doesn't bring down the game | Embedded library — tight coupling |
+| Hexagonal | Domain testable without infra, adapters replaceable | Layered — domain coupled to framework |
+| Virtual Threads | Zero overhead per I/O-bound thread | Platform threads — pool tuning required |
+| Redis for hot state | Sub-millisecond, atomic (SET NX) | Local Caffeine — breaks multi-instance |
+| PostgreSQL for cold data | Durable, transactional, full SQL | Persisted Redis — weaker ACID guarantees |
+| Async audit | Database off critical path | Synchronous — adds 5–20ms |
+| Fail-open everywhere | Game continuity > anti-fraud | Fail-closed — any failure blocks players |
+| ZGC | < 1ms pauses | G1GC — 10–50ms pauses under pressure |
+| Immutable records | Thread safety by construction | Mutable classes + synchronized |
+
+---
+
+## Project Structure
 
 ```
 ragnarok-antifraude/
-├── CLAUDE.md                              # Especificação para Claude Code
-├── README.md                              # Este arquivo
+├── CLAUDE.md                              # Context file for Claude Code
+├── README.md                              # This file
 ├── pom.xml                                # Java 21, Spring Boot 3.2.5
 ├── Dockerfile                             # Multi-stage, JRE 21, ZGC, non-root
-├── docker-compose.yml                     # PostgreSQL + Redis + antifraude
+├── docker-compose.yml                     # PostgreSQL + Redis + antifraude + Prometheus + Grafana
 ├── docker/
-│   └── init-multiple-dbs.sh               # Cria os dois bancos no PostgreSQL
+│   ├── init-multiple-dbs.sh               # Creates both databases in PostgreSQL
+│   ├── prometheus.yml                     # Prometheus scrape config
+│   └── grafana/                           # Grafana provisioning (datasource + dashboards)
 ├── scripts/
-│   └── stress_test.sh                     # Teste de carga com relatório de SLA
-├── integration-core/                      # Arquivos para copiar no ragnarok-core
-│   ├── FraudClient.java                   # Client HTTP + Circuit Breaker
-│   ├── UsageExamples.java                 # Exemplos de uso nos Services
-│   └── application-antifraude.yml         # Config Resilience4j
+│   └── stress_test.sh                     # Load test with SLA report
+├── integration-core/                      # Files to copy into ragnarok-core
+│   ├── FraudClient.java                   # HTTP client + Circuit Breaker (replaces core stub)
+│   ├── UsageExamples.java                 # Usage examples in core Services
+│   └── application-antifraude.yml         # Resilience4j config for core
 └── src/
     ├── main/
     │   ├── java/com/ragnarok/antifraude/
@@ -615,13 +666,14 @@ ragnarok-antifraude/
     │   │   │       └── out/               # TransactionRepo, PlayerActivityRepo, AuditRepo
     │   │   ├── application/
     │   │   │   ├── service/               # FraudAnalysisService, AuditLogService
-    │   │   │   └── rule/                  # 9 implementações de FraudRule
+    │   │   │   └── rule/                  # 9 FraudRule implementations
     │   │   └── infrastructure/
     │   │       ├── adapter/in/rest/       # Controllers, DTOs, Mapper
     │   │       ├── adapter/out/redis/     # Redis adapters
     │   │       ├── adapter/out/persistence/ # JPA entities, repos, adapter
     │   │       ├── config/                # AsyncConfig, ApiKeyFilter
-    │   │       └── scheduler/             # MarketPriceRefresher
+    │   │       ├── scheduler/             # MarketPriceRefresher
+    │   │       └── simulation/            # SimulationService, SimulationResult
     │   └── resources/
     │       ├── application.yml
     │       └── db/migration/
@@ -636,34 +688,53 @@ ragnarok-antifraude/
 
 ## Troubleshooting
 
-**O antifraude não sobe no Docker:**
-Verifique se o PostgreSQL e Redis estão healthy com `docker compose ps`. O antifraude espera ambos ficarem prontos antes de iniciar (`depends_on: condition: service_healthy`).
+**Anti-fraud won't start in Docker:**
+Check that PostgreSQL and Redis are healthy with `docker compose ps`. The anti-fraud waits for both to be ready before starting (`depends_on: condition: service_healthy`).
 
 **"relation fraud_audit_log does not exist":**
-O Flyway não rodou. Verifique se o banco `ragnarok_antifraude_db` existe e se `DB_PASS` está correto.
+Flyway didn't run. Check that the `ragnarok_antifraude_db` database exists and that `DB_PASS` is correct. If the volume was created before the init script, run `docker compose down -v && docker compose up -d`.
 
-**Todas as decisões são APPROVED, mesmo para fraudes óbvias:**
-Verifique se o Redis está acessível. Sem Redis, as regras 1-4, 6 e 8 fazem fail-open (retornam APPROVED).
+**All decisions are APPROVED even for obvious fraud:**
+Check if Redis is accessible. Without Redis, rules 1–4, 6, and 8 fail-open (return APPROVED).
 
-**Latência alta no stress test:**
-Verifique se o Redis está na mesma rede. Latência de rede ao Redis > 1ms impacta todas as regras.
+**High latency on stress test:**
+Check that Redis is on the same network. Redis network latency > 1ms impacts all rules.
 
-**CircuitBreaker do FraudClient (no core) sempre aberto:**
-Verifique se o `ANTIFRAUDE_API_KEY` do core bate com o do antifraude. HTTP 401 conta como falha para o CircuitBreaker.
+**FraudClient CircuitBreaker (in core) always open:**
+Check that the `ANTIFRAUDE_API_KEY` in the core matches the one in the anti-fraud. HTTP 401 counts as a failure for the CircuitBreaker.
 
-**Container marcado como unhealthy:**
-O HEALTHCHECK usa `wget` no `/api/fraud/health`. Se não responde em 5s, é marcado unhealthy. O `start_period` é de 40s para dar tempo ao Spring Boot iniciar.
+**Container marked as unhealthy:**
+The HEALTHCHECK uses `wget` on `/api/fraud/health`. If it doesn't respond in 5s, it's marked unhealthy. The `start_period` is 40s to allow Spring Boot to start.
+
+**`TypeTag::UNKNOWN` error during build:**
+The JAR file is locked by a running instance. Stop the application before running `./mvnw clean install`.
+
+---
+
+## Known Issues
+
+| Priority | Issue | Location |
+|----------|-------|----------|
+| 🔴 High | Instance cooldown only persists in Redis — lost on Redis restart | `RedisPlayerActivityAdapter.recordInstanceEntry()` — PostgreSQL write not implemented |
+| 🔴 High | `FraudClient` in ragnarok-core is a stub — zero events actually reach this service | `ragnarok-core/.../antifraude/FraudClient.java` — replace with `integration-core/FraudClient.java` |
+| 🟡 Medium | `ExecutorService` in parallel engine has no `@PreDestroy` — not closed on shutdown | `FraudAnalysisService` line 51 |
+| 🟡 Medium | `networkLatencyMs` from payload is read but never used in analysis | `BotClickSpeedRule` |
+| 🟡 Medium | `ApiKeyFilter` uses `String.equals` instead of constant-time comparison (timing attack risk) | `ApiKeyFilter` line 56 |
+| 🟡 Medium | `saveRegistrationData` does not persist `emailVerified`/`ageVerified` (only stores document) | `RedisPlayerActivityAdapter` line 160 |
+| 🟢 Low | Unit tests missing for rules 4 (BotClickSpeed), 6 (CashSecurity), 7 (InstanceCooldown) | `FraudRulesUnitTest` |
 
 ---
 
 ## Roadmap
 
-- [ ] Rate limiting por playerId no endpoint `/analyze`
-- [ ] Métricas Prometheus via Actuator (`/actuator/prometheus`)
-- [ ] Grafana dashboard pré-configurado (latência, verdicts, regras)
-- [ ] Kafka como alternativa ao REST para eventos de alta frequência
-- [ ] Machine learning para detecção de padrões de bot
-- [ ] Admin UI web (React) para game masters
-- [ ] Notificações via webhook (Discord/Slack) para bloqueios CRITICAL
-- [ ] Multi-instância com Redis Cluster
-- [ ] Replay de eventos para testar novas regras contra tráfego histórico
+- [ ] Replace `FraudClient` stub in ragnarok-core with `integration-core/FraudClient.java`
+- [ ] Persist instance cooldowns to PostgreSQL (source of truth)
+- [ ] `@PreDestroy` on `FraudAnalysisService` executor
+- [ ] Unit tests for rules 4, 6, and 7
+- [ ] Rate limiting per playerId on the `/analyze` endpoint
+- [ ] Kafka as an alternative to REST for high-frequency events
+- [ ] Machine learning for bot pattern detection
+- [ ] Admin web UI (React) for game masters
+- [ ] Webhook notifications (Discord/Slack) for CRITICAL blocks
+- [ ] Multi-instance support with Redis Cluster
+- [ ] Event replay to test new rules against historical traffic
